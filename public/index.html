@@ -222,26 +222,54 @@ const QAIP_DATA = [
   {"domain":"V. Performing Internal Audit Services","principle":"15. Communicate Results and Monitor Plans","standard":"15.2 Confirming the Implementation of Recommendations or Action Plans","question":"Is there a follow-up process in place to confirm implementation of action plans?","evidence":"• A routinely updated tracking system (for example, a spreadsheet, database, or other tool) that contains the finding, associated corrective action plan, status, and internal audit's confirmation.\n• Corrective action status reports prepared for the board and senior management.","rating":"GC"}
 ];
 
-const STORAGE_KEY = 'qaip_tracker_2025';
 let assessments = {};
+let saveTimer = null;
 
-function loadAssessments() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    assessments = JSON.parse(saved);
-  } else {
-    QAIP_DATA.forEach((item, i) => {
-      assessments[i] = { rating: item.rating || null, notes: '' };
+async function loadAssessments() {
+  try {
+    const res = await fetch('/api/assessment');
+    const data = await res.json();
+    if (Object.keys(data).length > 0) {
+      assessments = data;
+    } else {
+      seedDefaults();
+      await persistSave();
+    }
+  } catch {
+    const local = localStorage.getItem('qaip_tracker_2025');
+    assessments = local ? JSON.parse(local) : {};
+    if (!Object.keys(assessments).length) seedDefaults();
+  }
+}
+
+function seedDefaults() {
+  QAIP_DATA.forEach((item, i) => {
+    assessments[i] = { rating: item.rating || null, notes: '', files: [] };
+  });
+}
+
+async function persistSave() {
+  try {
+    await fetch('/api/assessment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(assessments)
     });
-    save();
+    localStorage.setItem('qaip_tracker_2025', JSON.stringify(assessments));
+  } catch {
+    localStorage.setItem('qaip_tracker_2025', JSON.stringify(assessments));
   }
 }
 
 function save() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(assessments));
   const el = document.getElementById('saveStatus');
-  el.textContent = 'Saved';
-  setTimeout(() => { el.textContent = 'All changes saved'; }, 1500);
+  el.textContent = 'Saving…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await persistSave();
+    el.textContent = 'Saved to file';
+    setTimeout(() => { el.textContent = 'All changes saved'; }, 1500);
+  }, 600);
 }
 
 function getDomains() {
@@ -596,12 +624,14 @@ function dropFile(e, i) {
 }
 
 // Init
-loadAssessments();
-const domains = getDomains();
-buildSidebar(domains);
-buildMain(domains);
-updateScores();
-initScrollSpy(domains);
+(async () => {
+  await loadAssessments();
+  const domains = getDomains();
+  buildSidebar(domains);
+  buildMain(domains);
+  updateScores();
+  initScrollSpy(domains);
+})();
 </script>
 </body>
 </html>

@@ -13,7 +13,15 @@ require('dotenv').config();
 const express    = require('express');
 const path       = require('path');
 const https      = require('https');
+const fs         = require('fs');
 const rateLimit  = require('express-rate-limit');
+
+const DATA_FILE = path.join(__dirname, 'data', 'assessment.json');
+
+function ensureDataDir() {
+  const dir = path.join(__dirname, 'data');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+}
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -56,6 +64,28 @@ const apiLimiter = rateLimit({
   message  : { error: 'Too many requests. Please wait before generating another report.' },
   standardHeaders: true,
   legacyHeaders  : false,
+});
+
+// ── Assessment data (file-based persistence) ──────────────────────────────────
+app.get('/api/assessment', (req, res) => {
+  ensureDataDir();
+  if (!fs.existsSync(DATA_FILE)) return res.json({});
+  try {
+    const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    res.json(data);
+  } catch {
+    res.json({});
+  }
+});
+
+app.post('/api/assessment', (req, res) => {
+  ensureDataDir();
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(req.body, null, 2), 'utf8');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save: ' + err.message });
+  }
 });
 
 // ── Static frontend ───────────────────────────────────────────────────────────
