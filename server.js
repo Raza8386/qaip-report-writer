@@ -12,9 +12,9 @@ require('dotenv').config();
 
 const express    = require('express');
 const path       = require('path');
-const https      = require('https');
 const fs         = require('fs');
 const rateLimit  = require('express-rate-limit');
+const Anthropic  = require('@anthropic-ai/sdk');
 
 const DATA_FILE = path.join(__dirname, 'data', 'assessment.json');
 
@@ -34,6 +34,8 @@ if (!ANTHROPIC_API_KEY) {
   console.error('    Copy .env.example to .env and add your key.\n');
   process.exit(1);
 }
+
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '1mb' }));
@@ -91,34 +93,39 @@ app.post('/api/assessment', (req, res) => {
 // ── Static frontend ───────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Claude API proxy ──────────────────────────────────────────────────────────
-app.post('/api/claude', apiLimiter, (req, res) => {
-  const body = JSON.stringify(req.body);
+// ── Claude API — streaming SSE ────────────────────────────────────────────────
+app.post('/api/claude', apiLimiter, async (req, res) => {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
 
-  const options = {
-    hostname: 'api.anthropic.com',
-    path    : '/v1/messages',
-    method  : 'POST',
-    headers : {
-      'Content-Type'      : 'application/json',
-      'Content-Length'    : Buffer.byteLength(body),
-      'x-api-key'         : ANTHROPIC_API_KEY,
-      'anthropic-version' : '2023-06-01',
-    },
-  };
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
-  const apiReq = https.request(options, (apiRes) => {
-    res.status(apiRes.statusCode);
-    apiRes.pipe(res);
-  });
+  try {
+    const stream = anthropic.messages.stream({
+      model      : req.body.model      || 'claude-sonnet-4-6',
+      max_tokens : req.body.max_tokens || 8000,
+      system     : req.body.system,
+      messages   : req.body.messages,
+    });
 
-  apiReq.on('error', (err) => {
+    stream.on('text', (text) => send({ text }));
+
+    stream.on('error', (err) => {
+      console.error('[Claude stream error]', err.message);
+      send({ error: err.message });
+      res.end();
+    });
+
+    const final = await stream.finalMessage();
+    send({ done: true, usage: final.usage });
+    res.end();
+
+  } catch (err) {
     console.error('[Claude API error]', err.message);
-    res.status(502).json({ error: 'Failed to reach Anthropic API: ' + err.message });
-  });
-
-  apiReq.write(body);
-  apiReq.end();
+    send({ error: err.message });
+    res.end();
+  }
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────

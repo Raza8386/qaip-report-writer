@@ -81,6 +81,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#F0F4F8;color:#1E293
 .step.active .sdot{background:#1D9E75;animation:pulse 1s ease infinite;}
 .step.done .sdot{background:#94A3B8;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.stream-preview{width:100%;max-width:480px;max-height:110px;overflow:hidden;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 14px;font-size:10.5px;font-family:monospace;color:#64748B;line-height:1.5;word-break:break-all;display:none;}
+.stream-preview.visible{display:block;}
 
 /* Toolbar */
 .toolbar{background:#fff;border-bottom:1px solid #E2E8F0;padding:11px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
@@ -313,6 +315,7 @@ Domain III – Governing: GC across all 9 standards.
           <div class="step" id="s4"><div class="sdot"></div>Formulating recommendations</div>
           <div class="step" id="s5"><div class="sdot"></div>Composing final report</div>
         </div>
+        <div class="stream-preview" id="streamPreview"></div>
       </div>
 
       <!-- Report Preview -->
@@ -20490,13 +20493,26 @@ function startSteps(){
   const ids = ['s1','s2','s3','s4','s5'];
   ids.forEach(id=>{ document.getElementById(id).className='step'; });
   document.getElementById('s1').className='step active';
-  let i=0;
-  stepTimer = setInterval(()=>{
-    document.getElementById(ids[i]).className='step done';
-    i++;
-    if(i<ids.length) document.getElementById(ids[i]).className='step active';
-    else clearInterval(stepTimer);
-  }, 2400);
+}
+
+// Advance steps based on chars received; milestones matched to typical output length
+const STEP_IDS = ['s1','s2','s3','s4','s5'];
+const STEP_MILESTONES = [0, 600, 1800, 3500, 5500];
+let _stepIdx = 0;
+
+function resetStepProgress(){
+  _stepIdx = 0;
+}
+
+function advanceStepsByChars(totalChars){
+  for(let mi = STEP_MILESTONES.length-1; mi > _stepIdx; mi--){
+    if(totalChars >= STEP_MILESTONES[mi]){
+      for(let j = _stepIdx; j < mi; j++) document.getElementById(STEP_IDS[j]).className='step done';
+      if(mi < STEP_IDS.length) document.getElementById(STEP_IDS[mi]).className='step active';
+      _stepIdx = mi;
+      break;
+    }
+  }
 }
 
 // ── Rating helpers ──
@@ -20562,6 +20578,10 @@ async function generate(){
   btn.disabled = true;
   showPane('loading');
   startSteps();
+  resetStepProgress();
+  const preview = document.getElementById('streamPreview');
+  preview.textContent = '';
+  preview.classList.remove('visible');
   setStatus('');
 
   const SYS = `You are a senior QAIP (Quality Assurance and Improvement Program) expert and professional report writer with deep knowledge of the IIA Global Internal Audit Standards 2024. You produce clear, analytical, Audit-Committee-ready reports.
@@ -20641,42 +20661,67 @@ Instructions:
       body:JSON.stringify({
         model:'claude-sonnet-4-6',
         max_tokens:8000,
-        system:SYS,
+        system:[{type:'text',text:SYS,cache_control:{type:'ephemeral'}}],
         messages:[{role:'user',content:USR}]
       })
     });
 
     if(!resp.ok){
       const e = await resp.json().catch(()=>({}));
-      throw new Error(e.error?.message||`HTTP ${resp.status}`);
+      throw new Error(e.error||e.error?.message||`HTTP ${resp.status}`);
     }
 
-    const result = await resp.json();
-    let raw = (result.content||[]).map(b=>b.text||'').join('').trim();
-    raw = raw.replace(/^```json?\n?/,'').replace(/\n?```$/,'');
+    // ── Stream SSE chunks ──────────────────────────────────────────────────────
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let raw    = '';
 
-    // Attempt repair if truncated
+    preview.classList.add('visible');
+
+    outer: while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, {stream:true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line for next chunk
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        let msg;
+        try { msg = JSON.parse(line.slice(6)); } catch{ continue; }
+        if(msg.error) throw new Error(msg.error);
+        if(msg.text){
+          raw += msg.text;
+          // show last ~400 chars so the box scrolls "live"
+          preview.textContent = raw.length > 400 ? '…'+raw.slice(-400) : raw;
+          advanceStepsByChars(raw.length);
+        }
+        if(msg.done) break outer;
+      }
+    }
+
+    // ── Parse structured report ────────────────────────────────────────────────
+    preview.classList.remove('visible');
+    STEP_IDS.forEach(id=>document.getElementById(id).className='step done');
+
+    let clean = raw.trim().replace(/^```json?\n?/,'').replace(/\n?```$/,'');
     let parsed;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(clean);
     } catch(e1) {
-      raw = repairJSON(raw);
+      clean = repairJSON(clean);
       try {
-        parsed = JSON.parse(raw);
+        parsed = JSON.parse(clean);
       } catch(e2) {
         throw new Error('Report JSON was truncated. Try again — if it persists, reduce the amount of assessment data pasted.');
       }
     }
     reportData = parsed;
-    clearInterval(stepTimer);
-    ['s1','s2','s3','s4','s5'].forEach(id=>document.getElementById(id).className='step done');
-
     renderPreview(reportData);
     showPane('preview');
     setStatus('Report generated successfully','ok');
 
   } catch(err){
-    clearInterval(stepTimer);
     console.error(err);
     setStatus('Error: '+err.message,'err');
     showPane('welcome');
